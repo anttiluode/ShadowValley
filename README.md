@@ -77,6 +77,39 @@ This is one synthetic 8-slot task with scalar values, tiny models and CPU runs. 
 
 **A methods note.** The first version of the shuffled control permuted residuals *within each batch and cue*. A random permutation has on average one fixed point, so about 1/n of the true correlation leaked through (n ≈ 32 per cue). That was enough for the teacher to find the slot, and the control "solved" 19/20. The control now pairs each batch's readings with residuals from the previous batch. HEAD's `unsigned.py` uses the within-batch permutation too. It reported 0/10 there, so the leak did not matter in that setting, but it is worth knowing.
 
+## Follow-up: are standard blocks hiding silent complement reads? (`complement.py`)
+
+Neon's question: the standard LayerNorm + MLP blocks did not get stuck, but are some of them quietly solving by complement reading, with the attention map hiding it? In the zero-sum world two readers agree on every training example:
+
+* **direct:** y = x_j − c, which uses slot j.
+* **complement:** y = −(Σ_{i≠j} x_i − 7c), which never touches slot j.
+
+They disagree as soon as one slot moves on its own. I retrained 180 networks (9 cells × 20 seeds, same seeds as above). For each solved one, I re-drew **only** slot j's detail and, separately, **only** one other slot's detail, and regressed the output change on the input change:
+
+* k_target: direct → 1, complement → 0.
+* k_other: direct → 0, complement → −1.
+
+I also erased slot j's detail entirely (knockout), and added i.i.d. N(0, 0.1²) noise to every slot with the target unchanged. An ideal direct reader loses 1× the noise variance, an ideal complement reader 7×. Results: `results/complement.json`, `results/complement.md`.
+
+| cell (solved runs) | causal read: direct / complement / mixed | attention "at" but causal complement | complement runs: attention on j, k_target, k_other, knockout change, noise vs direct |
+|---|---|---|---|
+| A one-hot, softmax (14) | 9 / **5** / 0 | **0** | 0.012, −0.10, −1.10, **1%**, **8.5×** |
+| A one-hot, flashlight (20) | 20 / 0 / 0 | 0 | – |
+| B one-hot, softmax (17) | 15 / **2** / 0 | **0** | 0.081, +0.05, −0.90, 13%, **6.8×** |
+| B one-hot, differential (20) / cog (20) | 20 / 0 / 0 each | 0 | – |
+| B′ scalar, softmax (5) / 2 heads (14) | 5 / 0 / 0, 13 / 0 / 1 | 0 | – |
+| A′ scalar, softmax (9) | 9 / 0 / 0 | 0 | – |
+| C self-mean, softmax (14) | 0 / 0 / 14 (see below) | 0 | – |
+
+What this shows:
+
+1. **No hidden complement reads.** In every architecture, whenever attention put its weight on the answer token, the network was causally reading that token (k_target ≈ 1). The standard blocks were not secretly solving another way.
+2. **Complement reads are real, and the attention map is honest about them.** 5 of 14 solved one-hot attention-only networks and 2 of 17 solved one-hot blocks read the complement. Their attention on the answer token is ~1–8%. Changing the answer token's value does nothing (k_target ≈ 0). Erasing the token's detail entirely changes the output by 1% (A) to 13% (B). They are 6.8–8.5× more sensitive to input noise, close to the ideal 7×. So the attention map does **not** mislead here; it correctly shows the head ignoring the answer. The risk is different: the network is right only because the data obeys a constraint (the details sum to zero), and it breaks as soon as that constraint is violated.
+3. **The fixes remove the shortcut.** The flashlight, Differential and Cog cells: 0 complement reads in 60 solved networks.
+4. **C cannot be classified with this probe.** There the network infers the cue from the average itself. Moving one slot shifts the average by about half a cue step, so the probes change the route rather than test it (k_target +0.31, knockout 118%). An honest test for C would perturb in a way that keeps the average fixed.
+
+What this means beyond this toy: the warning is not "attention maps lie". It is that a network can solve a task through an invariant of its training data rather than through the input you think it uses. Attention can show that when you check it; a knockout of the input you think it uses makes it obvious.
+
 ## Reproduce
 
 Windows, Python 3.13 (CPU is enough):
@@ -87,6 +120,7 @@ py -3.13 -m pytest -q tests                # 5 tests, seconds
 py -3.13 run_all.py --quick                # 3 seeds per cell, a few minutes
 py -3.13 run_all.py                        # full: 600 runs, ~3 CPU-hours, spread over all cores
 py -3.13 summarize.py                      # results/summary.md, summary.json, figure.png
+py -3.13 complement.py                     # silent-complement probe, 180 runs, ~1 CPU-hour
 ```
 
 On Linux or macOS use `python3`. To rerun one cell: `py -3.13 run_all.py --only "A' attn, scalar cue | softmax"`.
@@ -96,6 +130,7 @@ On Linux or macOS use `python3`. To rerun one cell: `py -3.13 run_all.py --only 
 * `sv.py`: the task, the three architectures, the four routing rules, the teacher and its controls, and the measurements.
 * `run_all.py`: the cells and the parallel runner.
 * `summarize.py`: tables, formula checks and the figure.
+* `complement.py`: the causal probe (re-draw one slot, knockout, input noise) on freshly trained networks.
 * `results/cells.json`: every run, including per-cue attention measurements and training traces.
 
 Built by Claude (Opus 5.5) from HEAD (Sol), Neon's Shadow Valley formula and the sign-blind routing idea.

@@ -189,7 +189,7 @@ def predicted_nmse(a_row, j, detail):
 
 
 def train_eval(seed, arch, kind, heads=1, detail='zero-sum', polarity=1.0, steps=2000, batch=256,
-               lr=3e-3, aux_weight=0.25, aux_frac=0.25, aux_mode='unsigned', record=False):
+               lr=3e-3, aux_weight=0.25, aux_frac=0.25, aux_mode='unsigned', record=False, return_model=False):
     torch.manual_seed(seed)
     mapping = torch.randperm(SLOTS, generator=torch.Generator().manual_seed(1000 + seed))
     flash = kind == 'flashlight'
@@ -293,4 +293,6 @@ def train_eval(seed, arch, kind, heads=1, detail='zero-sum', polarity=1.0, steps
             res['teacher_correct_at_cutoff'] = int((table_t == mapping).sum())
         if record:
             res['trace'] = trace
+    if return_model:
+        return res, model, mapping
     return res
