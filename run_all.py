@@ -1,6 +1,6 @@
 """Run every cell of the benchmark, 20 seeds each, and save results/cells.json.
 
-    python run_all.py            # ~1 h on 2 CPU cores (uses all cores, one thread per run)
+    python run_all.py            # ~1 h on 2 CPU cores, 560 runs (uses all cores, one thread per run)
     python run_all.py --quick    # 3 seeds per cell, a few minutes
 """
 import argparse, json, os, time
@@ -9,30 +9,38 @@ from pathlib import Path
 import torch
 
 CELLS = [
-    # name,                                   arch,    kind,        heads, detail,    polarity, aux_mode,   steps
-    ('A attn | softmax',                      'attn',  'softmax',    1, 'zero-sum',  1, 'unsigned', 2000),
-    ('A attn | differential',                 'attn',  'diff',       1, 'zero-sum',  1, 'unsigned', 2000),
-    ('A attn | cog',                          'attn',  'cog',        1, 'zero-sum',  1, 'unsigned', 2000),
-    ('A attn | flashlight',                   'attn',  'flashlight', 1, 'zero-sum',  1, 'unsigned', 2000),
-    ('A attn | softmax | iid control',        'attn',  'softmax',    1, 'iid',       1, 'unsigned', 2000),
-    ('A attn | softmax | 4x longer',          'attn',  'softmax',    1, 'zero-sum',  1, 'unsigned', 8000),
-    ('B block | softmax',                     'block', 'softmax',    1, 'zero-sum',  1, 'unsigned', 2000),
-    ('B block | differential',                'block', 'diff',       1, 'zero-sum',  1, 'unsigned', 2000),
-    ('B block | cog',                         'block', 'cog',        1, 'zero-sum',  1, 'unsigned', 2000),
-    ('B block | flashlight',                  'block', 'flashlight', 1, 'zero-sum',  1, 'unsigned', 2000),
-    ('B block | softmax | iid control',       'block', 'softmax',    1, 'iid',       1, 'unsigned', 2000),
-    ('B block | softmax | reversed',          'block', 'softmax',    1, 'zero-sum', -1, 'unsigned', 2000),
-    ('B block | flashlight | reversed',       'block', 'flashlight', 1, 'zero-sum', -1, 'unsigned', 2000),
-    ('B block | flashlight signed | reversed','block', 'flashlight', 1, 'zero-sum', -1, 'signed',   2000),
-    ('B block | flashlight shuffled',         'block', 'flashlight', 1, 'zero-sum',  1, 'shuffled', 2000),
-    ('B block 2 heads | softmax',             'block', 'softmax',    2, 'zero-sum',  1, 'unsigned', 2000),
-    ('B block 2 heads | differential',        'block', 'diff',       2, 'zero-sum',  1, 'unsigned', 2000),
-    ('B block 2 heads | cog',                 'block', 'cog',        2, 'zero-sum',  1, 'unsigned', 2000),
-    ('B block 2 heads | flashlight',          'block', 'flashlight', 2, 'zero-sum',  1, 'unsigned', 2000),
-    ('C self-mean | softmax',                 'self',  'softmax',    1, 'zero-sum',  1, 'unsigned', 2000),
-    ('C self-mean | differential',            'self',  'diff',       1, 'zero-sum',  1, 'unsigned', 2000),
-    ('C self-mean | cog',                     'self',  'cog',        1, 'zero-sum',  1, 'unsigned', 2000),
-    ('C self-mean | flashlight',              'self',  'flashlight', 1, 'zero-sum',  1, 'unsigned', 2000),
+    # name,                                        arch,           kind,        heads, detail,  pol, aux_mode,  steps
+    # --- the trap condition: the query sees only the scalar cue level (as in HEAD) ---
+    ("A' attn, scalar cue | softmax",               'attn-scalar',  'softmax',    1, 'zero-sum',  1, 'unsigned', 2000),
+    ("A' attn, scalar cue | differential",          'attn-scalar',  'diff',       1, 'zero-sum',  1, 'unsigned', 2000),
+    ("A' attn, scalar cue | cog",                   'attn-scalar',  'cog',        1, 'zero-sum',  1, 'unsigned', 2000),
+    ("A' attn, scalar cue | flashlight",            'attn-scalar',  'flashlight', 1, 'zero-sum',  1, 'unsigned', 2000),
+    ("A' attn, scalar cue | softmax, 2 heads",      'attn-scalar',  'softmax',    2, 'zero-sum',  1, 'unsigned', 2000),
+    ("A' attn, scalar cue | softmax, 4x longer",    'attn-scalar',  'softmax',    1, 'zero-sum',  1, 'unsigned', 8000),
+    ("A' attn, scalar cue | softmax, iid detail",   'attn-scalar',  'softmax',    1, 'iid',       1, 'unsigned', 2000),
+    ("A' attn, scalar cue | softmax, reversed",     'attn-scalar',  'softmax',    1, 'zero-sum', -1, 'unsigned', 2000),
+    ("A' attn, scalar cue | flashlight, reversed",  'attn-scalar',  'flashlight', 1, 'zero-sum', -1, 'unsigned', 2000),
+    ("A' attn, scalar cue | signed teacher, reversed", 'attn-scalar', 'flashlight', 1, 'zero-sum', -1, 'signed', 2000),
+    ("A' attn, scalar cue | shuffled teacher",      'attn-scalar',  'flashlight', 1, 'zero-sum',  1, 'shuffled', 2000),
+    ("B' block, scalar cue | softmax",              'block-scalar', 'softmax',    1, 'zero-sum',  1, 'unsigned', 2000),
+    ("B' block, scalar cue | differential",         'block-scalar', 'diff',       1, 'zero-sum',  1, 'unsigned', 2000),
+    ("B' block, scalar cue | cog",                  'block-scalar', 'cog',        1, 'zero-sum',  1, 'unsigned', 2000),
+    ("B' block, scalar cue | flashlight",           'block-scalar', 'flashlight', 1, 'zero-sum',  1, 'unsigned', 2000),
+    ("B' block, scalar cue | softmax, 2 heads",     'block-scalar', 'softmax',    2, 'zero-sum',  1, 'unsigned', 2000),
+    # --- rich query: the cue also arrives as a one-hot embedding ---
+    ('A attn, one-hot cue | softmax',               'attn',         'softmax',    1, 'zero-sum',  1, 'unsigned', 2000),
+    ('A attn, one-hot cue | differential',          'attn',         'diff',       1, 'zero-sum',  1, 'unsigned', 2000),
+    ('A attn, one-hot cue | cog',                   'attn',         'cog',        1, 'zero-sum',  1, 'unsigned', 2000),
+    ('A attn, one-hot cue | flashlight',            'attn',         'flashlight', 1, 'zero-sum',  1, 'unsigned', 2000),
+    ('B block, one-hot cue | softmax',              'block',        'softmax',    1, 'zero-sum',  1, 'unsigned', 2000),
+    ('B block, one-hot cue | differential',         'block',        'diff',       1, 'zero-sum',  1, 'unsigned', 2000),
+    ('B block, one-hot cue | cog',                  'block',        'cog',        1, 'zero-sum',  1, 'unsigned', 2000),
+    ('B block, one-hot cue | flashlight',           'block',        'flashlight', 1, 'zero-sum',  1, 'unsigned', 2000),
+    # --- the network must compute the average itself (2 layers, no cue given) ---
+    ('C self-mean | softmax',                       'self',         'softmax',    1, 'zero-sum',  1, 'unsigned', 2000),
+    ('C self-mean | differential',                  'self',         'diff',       1, 'zero-sum',  1, 'unsigned', 2000),
+    ('C self-mean | cog',                           'self',         'cog',        1, 'zero-sum',  1, 'unsigned', 2000),
+    ('C self-mean | flashlight',                    'self',         'flashlight', 1, 'zero-sum',  1, 'unsigned', 2000),
 ]
 
 
@@ -53,7 +61,7 @@ if __name__ == '__main__':
     a = ap.parse_args()
     seeds = range(1, 4) if a.quick else range(1, 21)
     jobs = [c + (s,) for c in CELLS for s in seeds]
-    jobs.sort(key=lambda j: -j[7] * {'attn': 1, 'block': 2, 'self': 5}[j[1]])   # long jobs first
+    jobs.sort(key=lambda j: -j[7] * {'attn': 1, 'block': 2, 'self': 5}[j[1].replace('-scalar', '')])   # long jobs first
     Path(a.out).parent.mkdir(exist_ok=True)
     t0 = time.time(); rows = []
     with Pool(os.cpu_count()) as pool:

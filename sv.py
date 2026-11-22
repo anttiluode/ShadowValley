@@ -28,6 +28,8 @@ Architectures
                token embeds the cue (one-hot) and c. HEAD's reader written as a
                transformer; the cos^2 formula is exact for its head output.
   B  'block' : 1 standard pre-LN block (attention + GELU MLP), query token embeds cue.
+  A' 'attn-scalar', B' 'block-scalar': the same, but the query sees only the scalar cue
+               level c (HEAD's condition: a low-capacity query), no one-hot cue embedding.
   C  'self'  : 2 standard pre-LN blocks, query token gets NO cue. The network must
                compute the average itself (layer 1) and route from it (layer 2).
 """
@@ -120,12 +122,14 @@ class TinyTransformer(nn.Module):
         self.slot_x = nn.Linear(1, d)
         self.pos = nn.Parameter(torch.randn(SLOTS, d) * 0.5)
         self.qtok = nn.Parameter(torch.randn(d) * 0.5)
-        self.cue = nn.Embedding(SLOTS, d) if arch != 'self' else None
+        # '-scalar' archs: the query sees only the cue level c (HEAD's condition), no one-hot
+        self.cue = nn.Embedding(SLOTS, d) if arch in ('attn', 'block') else None
         self.cue_c = nn.Linear(1, d, bias=False) if arch != 'self' else None
-        if arch == 'attn':
+        base = arch.replace('-scalar', '')
+        if base == 'attn':
             self.blocks = nn.ModuleList([Block(d, heads, kind, norm=False, mlp=False)])
             self.ln_f = nn.Identity()
-        elif arch == 'block':
+        elif base == 'block':
             self.blocks = nn.ModuleList([Block(d, heads, kind)])
             self.ln_f = nn.LayerNorm(d)
         else:
@@ -138,7 +142,9 @@ class TinyTransformer(nn.Module):
         slots = self.slot_x(x[..., None]) + self.pos
         q = self.qtok.expand(B, -1)
         if self.cue is not None:
-            q = q + self.cue(cue_ids) + self.cue_c(LEVELS[cue_ids][:, None])
+            q = q + self.cue(cue_ids)
+        if self.cue_c is not None:
+            q = q + self.cue_c(LEVELS[cue_ids][:, None])
         h = torch.cat([q[:, None], slots], 1)
         for blk in self.blocks:
             h, a, s = blk(h)
@@ -230,6 +236,7 @@ def train_eval(seed, arch, kind, heads=1, detail='zero-sum', polarity=1.0, steps
                 po = others.abs() / others.abs().sum()
                 u = row - row.mean(); tt = -torch.ones(SLOTS) / SLOTS; tt[j] += 1
                 rows.append({'a_target': float(row[j]), 'top_is_target': int(row.argmax()) == j,
+                             'abs_top_is_target': int(row.abs().argmax()) == j,
                              'cos_to_target': float(u @ tt / (u.norm() * tt.norm() + 1e-30)),
                              'bottom_is_target': int(row.argmin()) == j,
                              'm_eff_others': float(1 / (po ** 2).sum()),
@@ -253,6 +260,15 @@ def train_eval(seed, arch, kind, heads=1, detail='zero-sum', polarity=1.0, steps
             bs.append(float((vv * pp).sum() / ((vv * vv).sum() + 1e-30)))
         res['beta_eff_median'] = float(torch.tensor(bs).median())
         res['cos_mean'] = sum(per_cue[g][best[g]]['cos_to_target'] for g in range(SLOTS)) / SLOTS
+        # how the head reads the target, per cue (best head): at / negative-at / away / other
+        modes = []
+        for g in range(SLOTS):
+            q = per_cue[g][best[g]]
+            modes.append('at' if q['abs_top_is_target'] and q['a_target'] > 0 else
+                         'negative-at' if q['abs_top_is_target'] else
+                         'away' if q['cos_to_target'] < 0 else 'other')
+        res['route_modes'] = modes
+        res['route_mode'] = max(set(modes), key=modes.count)
         res['success'] = res['nmse'] < 0.01
         # outcome: solved / valley (inverted side: the read points away) / other failure
         res['outcome'] = 'solved' if res['success'] else ('valley' if res['cos_mean'] < 0 else 'direct-side failure')
