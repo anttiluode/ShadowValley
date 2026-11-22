@@ -197,7 +197,7 @@ def train_eval(seed, arch, kind, heads=1, detail='zero-sum', polarity=1.0, steps
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     data = torch.Generator().manual_seed(7000 + seed)
     shuf = torch.Generator().manual_seed(37000 + seed)
-    table, table_t = CorrTable(), None
+    table, table_t, prev = CorrTable(), None, None
     aux_steps = int(aux_frac * steps)
     trace = []
     for step in range(steps):
@@ -206,13 +206,30 @@ def train_eval(seed, arch, kind, heads=1, detail='zero-sum', polarity=1.0, steps
         loss = F.mse_loss(p, y)
         if flash and step < aux_steps:
             r = (y - p).detach()
+            z = x - x.mean(1, keepdim=True)
             if aux_mode == 'shuffled':
-                for g in range(SLOTS):
-                    ix = torch.where(k == g)[0]
-                    r[ix] = r[ix[torch.randperm(len(ix), generator=shuf)]]
-            table.collect(k, x - x.mean(1, keepdim=True), r)
+                # Pair this batch's readings with residuals of the SAME cue from the PREVIOUS batch.
+                # (A within-batch permutation leaks: its ~1 fixed point per cue keeps ~1/n of the
+                # true correlation, enough for the teacher to find the slot.)
+                cur = (k.clone(), z.clone(), r.clone())
+                if prev is None:
+                    prev = cur
+                else:
+                    pk, pz, pr = prev
+                    ks, zs, rs = [], [], []
+                    for g in range(SLOTS):
+                        a_ix, b_ix = torch.where(k == g)[0], torch.where(pk == g)[0]
+                        n = min(len(a_ix), len(b_ix))
+                        ks.append(k[a_ix[:n]]); zs.append(z[a_ix[:n]]); rs.append(pr[b_ix[:n]])
+                    prev = cur
+                    table.collect(torch.cat(ks), torch.cat(zs), torch.cat(rs))
+            else:
+                table.collect(k, z, r)
             if step >= 8:
-                tgt = table.targets('signed' if aux_mode == 'signed' else 'unsigned')
+                if aux_mode == 'random':     # control: a fixed random cue->slot table, no information
+                    tgt = torch.randperm(SLOTS, generator=torch.Generator().manual_seed(55000 + seed))
+                else:
+                    tgt = table.targets('signed' if aux_mode == 'signed' else 'unsigned')
                 loss = loss + aux_weight * F.cross_entropy(s[:, 0], tgt[k])
                 table_t = tgt
         opt.zero_grad(); loss.backward(); opt.step()

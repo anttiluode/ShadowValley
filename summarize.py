@@ -37,7 +37,7 @@ for c in order:
     lines.append(f"| {c} | {s['solved']}/{n} | {s['solved_0.001']}/{n} | {modes['at']} / {modes['negative-at']} / {modes['away']} / {modes['other']} | {s['median_nmse']:.4f} | {tr} |")
 
 # formula checks on single-head softmax runs (A and B)
-chk = [r for r in runs if r['kind'] in ('softmax', 'flashlight') and r['heads'] == 1 and r['detail'] == 'zero-sum' and r['polarity'] > 0]
+chk = [r for r in runs if r['kind'] in ('softmax', 'flashlight') and r['heads'] == 1 and r['detail'] == 'zero-sum' and r['polarity'] > 0 and r['aux_mode'] == 'unsigned']
 meas = np.array([r['nmse'] for r in chk]); pred = np.array([r['pred_nmse_head0'] for r in chk])
 summary['_formula'] = {
     'runs': len(chk),

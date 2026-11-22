@@ -22,10 +22,12 @@ CELLS = [
     ("A' attn, scalar cue | flashlight, reversed",  'attn-scalar',  'flashlight', 1, 'zero-sum', -1, 'unsigned', 2000),
     ("A' attn, scalar cue | signed teacher, reversed", 'attn-scalar', 'flashlight', 1, 'zero-sum', -1, 'signed', 2000),
     ("A' attn, scalar cue | shuffled teacher",      'attn-scalar',  'flashlight', 1, 'zero-sum',  1, 'shuffled', 2000),
+    ("A' attn, scalar cue | random-table teacher",  'attn-scalar',  'flashlight', 1, 'zero-sum',  1, 'random',   2000),
     ("B' block, scalar cue | softmax",              'block-scalar', 'softmax',    1, 'zero-sum',  1, 'unsigned', 2000),
     ("B' block, scalar cue | differential",         'block-scalar', 'diff',       1, 'zero-sum',  1, 'unsigned', 2000),
     ("B' block, scalar cue | cog",                  'block-scalar', 'cog',        1, 'zero-sum',  1, 'unsigned', 2000),
     ("B' block, scalar cue | flashlight",           'block-scalar', 'flashlight', 1, 'zero-sum',  1, 'unsigned', 2000),
+    ("B' block, scalar cue | random-table teacher", 'block-scalar', 'flashlight', 1, 'zero-sum',  1, 'random',   2000),
     ("B' block, scalar cue | softmax, 2 heads",     'block-scalar', 'softmax',    2, 'zero-sum',  1, 'unsigned', 2000),
     # --- rich query: the cue also arrives as a one-hot embedding ---
     ('A attn, one-hot cue | softmax',               'attn',         'softmax',    1, 'zero-sum',  1, 'unsigned', 2000),
@@ -58,16 +60,21 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--quick', action='store_true')
     ap.add_argument('--out', default='results/cells.json')
+    ap.add_argument('--only', nargs='*', help='run only these cell names; merge into --out')
     a = ap.parse_args()
     seeds = range(1, 4) if a.quick else range(1, 21)
-    jobs = [c + (s,) for c in CELLS for s in seeds]
+    cells = [c for c in CELLS if not a.only or c[0] in a.only]
+    jobs = [c + (s,) for c in cells for s in seeds]
     jobs.sort(key=lambda j: -j[7] * {'attn': 1, 'block': 2, 'self': 5}[j[1].replace('-scalar', '')])   # long jobs first
     Path(a.out).parent.mkdir(exist_ok=True)
     t0 = time.time(); rows = []
+    keep = []
+    if a.only and Path(a.out).exists():
+        keep = [r for r in json.loads(Path(a.out).read_text())['runs'] if r['cell'] not in a.only]
     with Pool(os.cpu_count()) as pool:
         for i, r in enumerate(pool.imap_unordered(job, jobs), 1):
             rows.append(r)
             if i % 20 == 0 or i == len(jobs):
                 print(f'{i}/{len(jobs)} runs, {time.time() - t0:.0f} s', flush=True)
-                Path(a.out).write_text(json.dumps({'torch': torch.__version__, 'runs': rows}) + '\n')
+                Path(a.out).write_text(json.dumps({'torch': torch.__version__, 'runs': keep + rows}) + '\n')
     print('done', round(time.time() - t0), 's')
